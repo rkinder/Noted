@@ -6,7 +6,7 @@ import { io } from 'socket.io-client';
 
 const SAVE_DEBOUNCE_MS = 1500;
 
-export default function NoteEditor({ noteId, permission, onTitleChange, onDeleted, onShareClick }) {
+export default function NoteEditor({ noteId, permission, onTitleChange, onDeleted, onShareClick, onPresent }) {
   const { user } = useAuth();
   const [note, setNote] = useState(null);
   const [title, setTitle] = useState('');
@@ -126,6 +126,18 @@ export default function NoteEditor({ noteId, permission, onTitleChange, onDelete
 
         {/* Actions */}
         <div className="flex items-center gap-1">
+          <button
+            onClick={() => onPresent?.({ title, content })}
+            className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white bg-surface-600 hover:bg-surface-500 px-3 py-1.5 rounded-lg transition"
+            title="Present (full screen reader)"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+            </svg>
+            Present
+          </button>
+
           <button
             onClick={onShareClick}
             className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white bg-surface-600 hover:bg-surface-500 px-3 py-1.5 rounded-lg transition"

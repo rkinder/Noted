@@ -75,3 +75,16 @@ body {
   border-left-color: #4f46e5 !important;
   color: #94a3b8 !important;
 }
+
+/* Presentation mode — larger, readable typography */
+.presentation-content .wmde-markdown {
+  background-color: transparent !important;
+  font-size: 1.125rem !important;
+  line-height: 1.8 !important;
+}
+
+.presentation-content .wmde-markdown h1 { font-size: 2rem !important; margin-top: 2rem !important; }
+.presentation-content .wmde-markdown h2 { font-size: 1.6rem !important; margin-top: 1.75rem !important; }
+.presentation-content .wmde-markdown h3 { font-size: 1.3rem !important; margin-top: 1.5rem !important; }
+.presentation-content .wmde-markdown p  { margin-bottom: 1.25rem !important; }
+.presentation-content .wmde-markdown li { margin-bottom: 0.4rem !important; }
