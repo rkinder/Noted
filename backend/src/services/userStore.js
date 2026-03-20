@@ -1,46 +1,41 @@
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs');
-const storage = require('./storage');
-const { encrypt, decrypt } = require('./crypto');
+const { pool } = require('../db/client');
 
-const USERS_KEY = 'users/index.json';
+async function createUser(email, password) {
+  const normalized = email.toLowerCase().trim();
+  const passwordHash = await bcrypt.hash(password, 12);
+  const id = uuidv4();
 
-async function load() {
   try {
-    return JSON.parse(decrypt(await storage.readFile(USERS_KEY)));
-  } catch {
-    return [];
+    const { rows } = await pool.query(
+      `INSERT INTO users (id, email, password_hash)
+       VALUES ($1, $2, $3)
+       RETURNING id, email, created_at AS "createdAt"`,
+      [id, normalized, passwordHash]
+    );
+    return rows[0];
+  } catch (err) {
+    if (err.code === '23505') throw new Error('EMAIL_TAKEN'); // unique violation
+    throw err;
   }
 }
 
-async function save(users) {
-  await storage.writeFile(USERS_KEY, encrypt(JSON.stringify(users)));
-}
-
-async function createUser(email, password) {
-  const users = await load();
-  const normalized = email.toLowerCase().trim();
-  if (users.find(u => u.email === normalized)) throw new Error('EMAIL_TAKEN');
-
-  const user = {
-    id: uuidv4(),
-    email: normalized,
-    passwordHash: await bcrypt.hash(password, 12),
-    createdAt: new Date().toISOString(),
-  };
-  users.push(user);
-  await save(users);
-  return { id: user.id, email: user.email, createdAt: user.createdAt };
-}
-
 async function findByEmail(email) {
-  const users = await load();
-  return users.find(u => u.email === email.toLowerCase().trim()) || null;
+  const { rows } = await pool.query(
+    `SELECT id, email, password_hash AS "passwordHash", created_at AS "createdAt"
+     FROM users WHERE email = $1`,
+    [email.toLowerCase().trim()]
+  );
+  return rows[0] || null;
 }
 
 async function findById(id) {
-  const users = await load();
-  return users.find(u => u.id === id) || null;
+  const { rows } = await pool.query(
+    `SELECT id, email, created_at AS "createdAt" FROM users WHERE id = $1`,
+    [id]
+  );
+  return rows[0] || null;
 }
 
 async function verifyPassword(user, password) {
@@ -48,12 +43,14 @@ async function verifyPassword(user, password) {
 }
 
 async function searchByEmail(query, excludeId) {
-  const users = await load();
-  const q = query.toLowerCase();
-  return users
-    .filter(u => u.id !== excludeId && u.email.includes(q))
-    .map(u => ({ id: u.id, email: u.email }))
-    .slice(0, 10);
+  const { rows } = await pool.query(
+    `SELECT id, email FROM users
+     WHERE id != $1 AND email ILIKE $2
+     ORDER BY email
+     LIMIT 10`,
+    [excludeId, `%${query.toLowerCase()}%`]
+  );
+  return rows;
 }
 
 module.exports = { createUser, findByEmail, findById, verifyPassword, searchByEmail };
