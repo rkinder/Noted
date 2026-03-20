@@ -1,29 +1,34 @@
 import { useState, useEffect } from 'react';
 import { getNotes, deleteNote } from '../api/notes';
+import { getFolders } from '../api/folders';
 import { useAuth } from '../contexts/AuthContext';
 import NoteList from '../components/NoteList.jsx';
 import NoteEditor from '../components/NoteEditor.jsx';
 import ShareModal from '../components/ShareModal.jsx';
+import PresentationMode from '../components/PresentationMode.jsx';
 
 export default function NotesPage() {
   const { user, logout } = useAuth();
   const [notes, setNotes] = useState([]);
+  const [folders, setFolders] = useState([]);
   const [notesLoading, setNotesLoading] = useState(true);
   const [selectedNote, setSelectedNote] = useState(null);
+  const [selectedFolderId, setSelectedFolderId] = useState(undefined); // undefined = All Notes
   const [shareTarget, setShareTarget] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [presentation, setPresentation] = useState(null);
 
   useEffect(() => {
-    refreshNotes();
+    refreshAll();
   }, []);
 
-  const refreshNotes = async () => {
+  const refreshAll = async () => {
     setNotesLoading(true);
     try {
-      const data = await getNotes();
-      setNotes(data);
-      // Re-sync selected note metadata
-      setSelectedNote(prev => prev ? data.find(n => n.id === prev.id) || prev : null);
+      const [notesData, foldersData] = await Promise.all([getNotes(), getFolders()]);
+      setNotes(notesData);
+      setFolders(foldersData);
+      setSelectedNote(prev => prev ? notesData.find(n => n.id === prev.id) || prev : null);
     } finally {
       setNotesLoading(false);
     }
@@ -34,9 +39,7 @@ export default function NotesPage() {
     setSelectedNote({ ...note, isOwner: true, permission: 'write' });
   };
 
-  const handleSelect = (note) => {
-    setSelectedNote(note);
-  };
+  const handleSelect = (note) => setSelectedNote(note);
 
   const handleTitleChange = (noteId, newTitle) => {
     setNotes(prev => prev.map(n => n.id === noteId ? { ...n, title: newTitle } : n));
@@ -60,11 +63,28 @@ export default function NotesPage() {
     setShareTarget(prev => prev ? { ...prev, collaborators: updatedNote.collaborators } : prev);
   };
 
+  // ── Folder handlers ──
+  const handleFolderCreated = (folder) => setFolders(prev => [...prev, folder]);
+
+  const handleFolderUpdated = (updated) =>
+    setFolders(prev => prev.map(f => f.id === updated.id ? updated : f));
+
+  const handleFolderDeleted = (folderId) => {
+    setFolders(prev => prev.filter(f => f.id !== folderId));
+    if (selectedFolderId === folderId) setSelectedFolderId(undefined);
+    // Notes that were in the folder are now unfoldered — re-fetch to get updated folderId
+    setNotes(prev => prev.map(n => n.folderId === folderId ? { ...n, folderId: null } : n));
+  };
+
+  const handleNoteMoved = (noteId, folderId) => {
+    setNotes(prev => prev.map(n => n.id === noteId ? { ...n, folderId } : n));
+  };
+
   return (
     <div className="flex h-screen bg-surface-900 overflow-hidden">
       {/* Sidebar */}
       <div className={`flex flex-col bg-surface-800 border-r border-surface-600 transition-all duration-200 ${sidebarOpen ? 'w-64' : 'w-0 overflow-hidden'}`}>
-        {/* App header in sidebar */}
+        {/* App header */}
         <div className="flex items-center gap-2 px-3 py-3 border-b border-surface-600">
           <div className="flex items-center justify-center w-7 h-7 bg-indigo-600 rounded-lg flex-shrink-0">
             <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -74,7 +94,7 @@ export default function NotesPage() {
           </div>
           <span className="font-semibold text-white text-sm">Noted</span>
           <div className="flex-1" />
-          <button onClick={refreshNotes} className="text-gray-500 hover:text-gray-300 transition" title="Refresh">
+          <button onClick={refreshAll} className="text-gray-500 hover:text-gray-300 transition" title="Refresh">
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                 d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -85,9 +105,16 @@ export default function NotesPage() {
         <div className="flex-1 overflow-hidden">
           <NoteList
             notes={notes}
+            folders={folders}
             selectedId={selectedNote?.id}
+            selectedFolderId={selectedFolderId}
             onSelect={handleSelect}
             onCreated={handleCreated}
+            onFolderSelect={setSelectedFolderId}
+            onFolderCreated={handleFolderCreated}
+            onFolderUpdated={handleFolderUpdated}
+            onFolderDeleted={handleFolderDeleted}
+            onNoteMoved={handleNoteMoved}
             loading={notesLoading}
           />
         </div>
@@ -142,6 +169,7 @@ export default function NotesPage() {
               onTitleChange={handleTitleChange}
               onDeleted={handleDeleted}
               onShareClick={() => setShareTarget(selectedNote)}
+              onPresent={setPresentation}
             />
           ) : (
             <div className="flex flex-col items-center justify-center h-full text-center px-8">
@@ -157,6 +185,15 @@ export default function NotesPage() {
           )}
         </div>
       </div>
+
+      {/* Presentation mode */}
+      {presentation && (
+        <PresentationMode
+          title={presentation.title}
+          content={presentation.content}
+          onExit={() => setPresentation(null)}
+        />
+      )}
 
       {/* Share modal */}
       {shareTarget && (

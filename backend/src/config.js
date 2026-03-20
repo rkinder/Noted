@@ -2,6 +2,7 @@ require('dotenv').config();
 
 module.exports = {
   port: parseInt(process.env.PORT || '3001', 10),
+  databaseUrl: process.env.DATABASE_URL,
   encryptionKey: process.env.ENCRYPTION_KEY || 'dev-encryption-key-replace-in-production',
   jwtSecret: process.env.JWT_SECRET || 'dev-jwt-secret-replace-in-production',
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',

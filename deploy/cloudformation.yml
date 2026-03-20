@@ -1,0 +1,426 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Noted — Collaborative Encrypted Notes App.
+  Deploys a single EC2 instance running the full stack via Docker Compose,
+  with an S3 bucket for encrypted note storage and Secrets Manager for credentials.
+
+# ─── Parameters ───────────────────────────────────────────────────────────────
+Parameters:
+
+  EncryptionKey:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: "Secret key used to AES-256-GCM encrypt notes at rest (min 16 chars, keep this safe)"
+
+  JwtSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: "Secret key used to sign JWT session tokens (min 16 chars)"
+
+  PostgresPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: "Password for the PostgreSQL database"
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: "EC2 Key Pair for SSH access (must already exist in this region)"
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium, t3.large]
+    Description: "t3.micro works for low traffic; t3.small recommended for comfortable dev use"
+
+  GitRepoUrl:
+    Type: String
+    Default: https://github.com/rkinder/Noted.git
+    Description: "Git repository URL to clone (HTTPS)"
+
+  GitBranch:
+    Type: String
+    Default: master
+    Description: "Branch to deploy"
+
+  AllowedCidr:
+    Type: String
+    Default: "0.0.0.0/0"
+    Description: "CIDR block allowed to reach the app on port 80 (restrict to your IP for security)"
+
+  SshCidr:
+    Type: String
+    Default: "0.0.0.0/0"
+    Description: "CIDR block allowed to SSH (port 22). Restrict to your IP for security."
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Application Secrets" }
+        Parameters: [EncryptionKey, JwtSecret, PostgresPassword]
+      - Label: { default: "Infrastructure" }
+        Parameters: [KeyPairName, InstanceType]
+      - Label: { default: "Source Code" }
+        Parameters: [GitRepoUrl, GitBranch]
+      - Label: { default: "Access Control" }
+        Parameters: [AllowedCidr, SshCidr]
+    ParameterLabels:
+      EncryptionKey: { default: "Note Encryption Key" }
+      JwtSecret: { default: "JWT Secret" }
+      PostgresPassword: { default: "Database Password" }
+      KeyPairName: { default: "EC2 Key Pair" }
+      InstanceType: { default: "Instance Type" }
+      GitRepoUrl: { default: "Git Repository URL" }
+      GitBranch: { default: "Git Branch" }
+      AllowedCidr: { default: "App Access CIDR" }
+      SshCidr: { default: "SSH Access CIDR" }
+
+# ─── Resources ────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── VPC & Networking ─────────────────────────────────────────────────────────
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-igw"
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public"
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-rt"
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref RouteTable
+
+  # ── Security Group ────────────────────────────────────────────────────────────
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${AWS::StackName} — Noted app"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - Description: "HTTP — app access"
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedCidr
+        - Description: "SSH"
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SshCidr
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-sg"
+
+  # ── S3 Bucket (encrypted note content) ───────────────────────────────────────
+
+  NotesBucket:
+    Type: AWS::S3::Bucket
+    # DeletionPolicy: Retain keeps the bucket (and your notes) if the stack is deleted.
+    # Change to Delete if you want the bucket removed with the stack.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "noted-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        # S3-managed AES-256 is a second encryption layer on top of our
+        # application-level AES-256-GCM encryption.
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-notes"
+
+  # ── Secrets Manager ───────────────────────────────────────────────────────────
+
+  AppSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "/noted/${AWS::StackName}/secrets"
+      Description: "Noted app credentials — do not share"
+      SecretString: !Sub |
+        {
+          "encryptionKey": "${EncryptionKey}",
+          "jwtSecret": "${JwtSecret}",
+          "postgresPassword": "${PostgresPassword}"
+        }
+
+  # ── IAM Role & Instance Profile ───────────────────────────────────────────────
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-instance-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      # SSM Session Manager — allows browser-based SSH without opening port 22
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: S3NoteAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt NotesBucket.Arn
+                  - !Sub "${NotesBucket.Arn}/*"
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref AppSecrets
+        - PolicyName: CloudFormationSignal
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:SignalResource
+                Resource: !Ref AWS::StackId
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  # ── EC2 Instance ──────────────────────────────────────────────────────────────
+
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-eip"
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    # Wait up to 25 min for the cfn-signal at the end of UserData
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT25M
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      IamInstanceProfile: !Ref InstanceProfile
+      # Amazon Linux 2023 (x86_64) — resolved at deploy time
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      MetadataOptions:
+        HttpTokens: required          # IMDSv2
+        HttpPutResponseHopLimit: 2    # Allow Docker containers to reach IMDS for IAM credentials
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: true
+            Encrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-server"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > >(tee /var/log/noted-setup.log | logger -t noted-setup -s) 2>&1
+
+          echo "=== Noted setup starting at $(date) ==="
+          REGION="${AWS::Region}"
+          STACK="${AWS::StackName}"
+
+          # ── System packages ──────────────────────────────────────────────────
+          dnf update -y
+          dnf install -y docker git
+
+          # ── Docker Compose v2 ────────────────────────────────────────────────
+          COMPOSE_DIR=/usr/local/lib/docker/cli-plugins
+          mkdir -p "$COMPOSE_DIR"
+          curl -fsSL \
+            "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" \
+            -o "$COMPOSE_DIR/docker-compose"
+          chmod +x "$COMPOSE_DIR/docker-compose"
+
+          systemctl enable --now docker
+          usermod -aG docker ec2-user
+
+          # ── Clone repo ───────────────────────────────────────────────────────
+          git clone --branch "${GitBranch}" "${GitRepoUrl}" /opt/noted
+          cd /opt/noted
+
+          # ── Pull secrets from Secrets Manager ───────────────────────────────
+          SECRET_JSON=$(aws secretsmanager get-secret-value \
+            --region "$REGION" \
+            --secret-id "/noted/$STACK/secrets" \
+            --query SecretString --output text)
+
+          ENC_KEY=$(echo "$SECRET_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['encryptionKey'])")
+          JWT_SEC=$(echo "$SECRET_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['jwtSecret'])")
+          PG_PASS=$(echo "$SECRET_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['postgresPassword'])")
+
+          # ── Write .env (docker-compose reads this) ───────────────────────────
+          cat > /opt/noted/.env <<EOF
+          POSTGRES_PASSWORD=$PG_PASS
+          ENCRYPTION_KEY=$ENC_KEY
+          JWT_SECRET=$JWT_SEC
+          JWT_EXPIRES_IN=7d
+          STORAGE_TYPE=s3
+          S3_BUCKET_NAME=${NotesBucket}
+          AWS_REGION=$REGION
+          EOF
+
+          # ── Docker Compose override ──────────────────────────────────────────
+          # - Expose frontend on port 80 (not 3000)
+          # - Remove explicit AWS credentials; the container uses the EC2 IAM role
+          #   via IMDS (hop limit is set to 2 above so containers can reach it)
+          cat > /opt/noted/docker-compose.override.yml <<'OVERRIDE'
+          services:
+            frontend:
+              ports:
+                - "80:3000"
+            backend:
+              ports: []
+          OVERRIDE
+
+          # ── Build & start ────────────────────────────────────────────────────
+          docker compose up --build -d
+
+          # ── Systemd service for auto-start on reboot ─────────────────────────
+          cat > /etc/systemd/system/noted.service <<'SERVICE'
+          [Unit]
+          Description=Noted App (Docker Compose)
+          After=docker.service network-online.target
+          Requires=docker.service
+          Wants=network-online.target
+
+          [Service]
+          WorkingDirectory=/opt/noted
+          ExecStart=/usr/bin/docker compose up
+          ExecStop=/usr/bin/docker compose down
+          Restart=on-failure
+          RestartSec=15
+          TimeoutStartSec=120
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+
+          systemctl enable noted
+
+          echo "=== Noted setup complete at $(date) ==="
+
+          # ── Signal CloudFormation success ────────────────────────────────────
+          /opt/aws/bin/cfn-signal -e 0 \
+            --stack "$STACK" \
+            --resource EC2Instance \
+            --region "$REGION"
+
+  EIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref EC2Instance
+      EIP: !Ref ElasticIP
+
+# ─── Outputs ──────────────────────────────────────────────────────────────────
+Outputs:
+
+  AppURL:
+    Description: "URL of the Noted application"
+    Value: !Sub "http://${ElasticIP}"
+
+  S3BucketName:
+    Description: "S3 bucket storing AES-256-GCM encrypted note content"
+    Value: !Ref NotesBucket
+
+  EC2InstanceId:
+    Description: "EC2 instance ID (use for SSM Session Manager access)"
+    Value: !Ref EC2Instance
+
+  PublicIP:
+    Description: "Elastic IP address of the server"
+    Value: !Ref ElasticIP
+
+  SshCommand:
+    Description: "SSH command to connect to the server"
+    Value: !Sub "ssh -i ~/.ssh/${KeyPairName}.pem ec2-user@${ElasticIP}"
+
+  UpdateCommand:
+    Description: "One-liner to pull the latest code and redeploy"
+    Value: !Sub "ssh -i ~/.ssh/${KeyPairName}.pem ec2-user@${ElasticIP} 'cd /opt/noted && git pull && docker compose up --build -d'"
+
+  SetupLogCommand:
+    Description: "Command to check the initial setup log"
+    Value: !Sub "ssh -i ~/.ssh/${KeyPairName}.pem ec2-user@${ElasticIP} 'sudo cat /var/log/noted-setup.log'"

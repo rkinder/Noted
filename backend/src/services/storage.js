@@ -7,13 +7,17 @@ let _s3Client = null;
 function getS3() {
   if (!_s3Client) {
     const { S3Client } = require('@aws-sdk/client-s3');
-    _s3Client = new S3Client({
-      region: config.storage.s3.region,
-      credentials: {
+    const cfg = { region: config.storage.s3.region };
+    // Only pass explicit credentials when both are present.
+    // When running on EC2/ECS with an IAM role, omit them so the SDK uses
+    // the instance/task metadata credential provider automatically.
+    if (config.storage.s3.accessKeyId && config.storage.s3.secretAccessKey) {
+      cfg.credentials = {
         accessKeyId: config.storage.s3.accessKeyId,
         secretAccessKey: config.storage.s3.secretAccessKey,
-      },
-    });
+      };
+    }
+    _s3Client = new S3Client(cfg);
   }
   return _s3Client;
 }
