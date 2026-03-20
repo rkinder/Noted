@@ -1,0 +1,21 @@
+# Development overrides — hot-reload source mounts, skip frontend build
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+services:
+  backend:
+    build:
+      target: dev
+    command: npm run dev
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/package.json:/app/package.json
+
+  frontend:
+    build:
+      target: dev
+    command: npm run dev -- --host
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/package.json:/app/package.json
+    environment:
+      VITE_API_URL: http://backend:3001
